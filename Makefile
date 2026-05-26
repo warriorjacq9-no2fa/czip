@@ -2,4 +2,4 @@
 all: build/zip
 
 build/zip: zip.c zip.h
-	$(CC) $< -o $@
+	$(CC) -msse4.2 $< -o $@
