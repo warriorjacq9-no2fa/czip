@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <nmmintrin.h>
+#include <zlib.h>
 
 uint16_t dos_time() {
     time_t now = time(NULL);
@@ -31,26 +31,12 @@ uint16_t dos_date() {
     return dos_date;
 }
 
-uint32_t do_crc32(void* buf, size_t len) {
-    uint8_t* data = (uint8_t*)buf;
-    uint32_t crc;
-    while(len >= 8) {
-        crc = (uint32_t)_mm_crc32_u64(crc, *(uint64_t*)data);
-        data += 8;
-        len -= 8;
-    }
-
-    while(len > 0) {
-        crc = (uint32_t)_mm_crc32_u8(crc, *data);
-        data++;
-        len--;
-    }
-
-    return crc ^ 0xFFFFFFFF;
+uint32_t do_crc32(const void *buf, size_t len) {
+    return crc32(0L, (const Bytef*)buf, len);
 }
 
 int main(int argc, char* argv[]) {
-    if(argc != 2) {
+    if(argc < 2) {
         fprintf(stderr, "Usage: %s <outfile> [files]\n", argv[0]);
         return EXIT_FAILURE;
     }
@@ -63,12 +49,12 @@ int main(int argc, char* argv[]) {
     uint16_t date = dos_date();
 
     size_t files = argc - 2;
+    size_t cd_len = files * sizeof(zip_cdr_t);
 
     if(files > 0) {
 
         /* Prepare headers */
-        zip_cdr_t* cd = malloc(files * sizeof(zip_cdr_t));
-        zip_lfh_t* lfh = malloc(files * sizeof(zip_lfh_t));
+        zip_cdr_t* cd = malloc(cd_len);
         for(size_t i = 0; i < files; i++) {
             FILE* f = fopen(argv[2 + i], "rb");
             if(f == NULL) {
@@ -77,20 +63,36 @@ int main(int argc, char* argv[]) {
                 perror(msg);
                 continue;
             }
-            int res;
-            if((res = fseek(f, 0, SEEK_END)) < 0) {
+            if(fseek(f, 0, SEEK_END) < 0) {
                 perror("Error seeking");
+                fclose(f);
                 return EXIT_FAILURE;
             }
             size_t size = ftell(f);
-            void* data;
+            fseek(f, 0, SEEK_SET);
+            void* data = malloc(size);
             if(fread(data, 1, size, f) != size) {
                 perror("Error reading");
+                fclose(f);
                 return EXIT_FAILURE;
             }
             fclose(f);
 
             uint32_t crc32 = do_crc32(data, size);
+
+            zip_lfh_t lfh = {
+                .signature = LFH_SIG,
+                .min_version = 20,
+                .flags = 0,
+                .compression = 0,
+                .mtime = time,
+                .mdate = date,
+                .crc32 = crc32,
+                .size_comp = size,
+                .size = size,
+                .name_len = strlen(argv[2 + i]),
+                .extra_len = 0
+            };
 
             cd[i] = (zip_cdr_t){
                 .signature = CDR_SIG,
@@ -108,38 +110,66 @@ int main(int argc, char* argv[]) {
                 .disk_start = 0,
                 .attrs_internal = 0,
                 .attrs = 0,
-                .lfh_off = 0
+                .lfh_off = ftell(fil)
             };
 
-            lfh[i] = (zip_lfh_t){
-                .signature = LFH_SIG,
-                .min_version = 20,
-                .flags = 0,
-                .compression = 0,
-                .mtime = time,
-                .mdate = date,
-                .crc32 = crc32,
-                .size_comp = size,
-                .size = size,
-                .name_len = strlen(argv[2 + i]),
-                .extra_len = 0
-            };
+             /* Write LFH and data */
+
+            if(fwrite(&lfh, 1, sizeof(zip_lfh_t), fil) != sizeof(zip_lfh_t)) {
+                perror("Error writing LFH");
+                fclose(fil);
+                return EXIT_FAILURE;
+            }
+
+            if(fwrite(argv[2 + i], 1, strlen(argv[2 + i]), fil) != strlen(argv[2 + i])) {
+                perror("Error writing filename");
+                fclose(fil);
+                return EXIT_FAILURE;
+            }
+
+            if(fwrite(data, 1, size, fil) != size) {
+                perror("Error writing file data");
+                fclose(fil);
+                return EXIT_FAILURE;
+            }
         }
-        
-        /* Write headers and data */
+
+        /* Write central directory */
+
+        for(int i = 0; i < files; i++) {
+            if(fwrite(&cd[i], 1, sizeof(zip_cdr_t), fil) != sizeof(zip_cdr_t)) {
+                perror("Error writing central directory");
+                fclose(fil);
+                return EXIT_FAILURE;
+            }
+            if(fwrite(argv[2 + i], 1, cd[i].name_len, fil) != cd[i].name_len) {
+                perror("Error writing filename");
+                fclose(fil);
+                return EXIT_FAILURE;
+            }
+            cd_len += cd[i].name_len;
+        }
     }
+
+    /* Assemble and write EOCD */
 
     zip_eocd_t eocd = {
         .signature = EOCD_SIG,
         .disk_num = 0,
         .cd_disk_num = 0,
-        .disk_entries = 0,
-        .cd_len = 0,
-        .cd_size = 0,
-        .cd_offset = 0,
+        .cd_len_ldisk = files,
+        .cd_len = files,
+        .cd_size = cd_len,
+        .cd_offset = ftell(fil) - cd_len,
         .comment_len = 0
     };
 
-    fwrite(&eocd, sizeof(eocd), 1, fil);
+    size_t s;
+    if((s = fwrite(&eocd, 1, sizeof(zip_eocd_t), fil)) != sizeof(zip_eocd_t)) {
+        printf("%llu", s);
+        perror("Error writing EOCD");
+        fclose(fil);
+        return EXIT_FAILURE;
+    }
     fclose(fil);
 }
