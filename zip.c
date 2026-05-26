@@ -35,6 +35,82 @@ uint32_t do_crc32(const void *buf, size_t len) {
     return crc32(0L, (const Bytef*)buf, len);
 }
 
+int add_file(FILE* archive, FILE* f, char* filename, zip_cdr_t* cd, size_t cd_idx) {
+    uint16_t time = dos_time();
+    uint16_t date = dos_date();
+
+    if(fseek(f, 0, SEEK_END) < 0) {
+        perror("Error seeking");
+        fclose(f);
+        return EXIT_FAILURE;
+    }
+    size_t size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    void* data = malloc(size);
+    if(fread(data, 1, size, f) != size) {
+        perror("Error reading");
+        fclose(f);
+        return EXIT_FAILURE;
+    }
+    fclose(f);
+
+    uint32_t crc32 = do_crc32(data, size);
+
+    zip_lfh_t lfh = {
+        .signature = LFH_SIG,
+        .min_version = 20,
+        .flags = 0,
+        .compression = 0,
+        .mtime = time,
+        .mdate = date,
+        .crc32 = crc32,
+        .size_comp = size,
+        .size = size,
+        .name_len = strlen(filename),
+        .extra_len = 0
+    };
+
+    cd[cd_idx] = (zip_cdr_t){
+        .signature = CDR_SIG,
+        .version = 20,
+        .min_version = 20,
+        .flags = 0,
+        .mtime = time,
+        .mdate = date,
+        .crc32 = crc32,
+        .size_comp = size,
+        .size = size,
+        .name_len = strlen(filename),
+        .extra_len = 0,
+        .comment_len = 0,
+        .disk_start = 0,
+        .attrs_internal = 0,
+        .attrs = 0,
+        .lfh_off = ftell(archive)
+    };
+
+    /* Write LFH and data */
+
+    if(fwrite(&lfh, 1, sizeof(zip_lfh_t), archive) != sizeof(zip_lfh_t)) {
+        perror("Error writing LFH");
+        fclose(archive);
+        return EXIT_FAILURE;
+    }
+
+    if(fwrite(filename, 1, strlen(filename), archive) != strlen(filename)) {
+        perror("Error writing filename");
+        fclose(archive);
+        return EXIT_FAILURE;
+    }
+
+    if(fwrite(data, 1, size, archive) != size) {
+        perror("Error writing file data");
+        fclose(archive);
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+}
+
 int main(int argc, char* argv[]) {
     if(argc < 2) {
         fprintf(stderr, "Usage: %s <outfile> [files]\n", argv[0]);
@@ -45,8 +121,6 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "Failed to create file %s\n", argv[1]);
         return EXIT_FAILURE;
     }
-    uint16_t time = dos_time();
-    uint16_t date = dos_date();
 
     size_t files = argc - 2;
     size_t cd_len = files * sizeof(zip_cdr_t);
@@ -63,75 +137,7 @@ int main(int argc, char* argv[]) {
                 perror(msg);
                 continue;
             }
-            if(fseek(f, 0, SEEK_END) < 0) {
-                perror("Error seeking");
-                fclose(f);
-                return EXIT_FAILURE;
-            }
-            size_t size = ftell(f);
-            fseek(f, 0, SEEK_SET);
-            void* data = malloc(size);
-            if(fread(data, 1, size, f) != size) {
-                perror("Error reading");
-                fclose(f);
-                return EXIT_FAILURE;
-            }
-            fclose(f);
-
-            uint32_t crc32 = do_crc32(data, size);
-
-            zip_lfh_t lfh = {
-                .signature = LFH_SIG,
-                .min_version = 20,
-                .flags = 0,
-                .compression = 0,
-                .mtime = time,
-                .mdate = date,
-                .crc32 = crc32,
-                .size_comp = size,
-                .size = size,
-                .name_len = strlen(argv[2 + i]),
-                .extra_len = 0
-            };
-
-            cd[i] = (zip_cdr_t){
-                .signature = CDR_SIG,
-                .version = 20,
-                .min_version = 20,
-                .flags = 0,
-                .mtime = time,
-                .mdate = date,
-                .crc32 = crc32,
-                .size_comp = size,
-                .size = size,
-                .name_len = strlen(argv[2 + i]),
-                .extra_len = 0,
-                .comment_len = 0,
-                .disk_start = 0,
-                .attrs_internal = 0,
-                .attrs = 0,
-                .lfh_off = ftell(fil)
-            };
-
-             /* Write LFH and data */
-
-            if(fwrite(&lfh, 1, sizeof(zip_lfh_t), fil) != sizeof(zip_lfh_t)) {
-                perror("Error writing LFH");
-                fclose(fil);
-                return EXIT_FAILURE;
-            }
-
-            if(fwrite(argv[2 + i], 1, strlen(argv[2 + i]), fil) != strlen(argv[2 + i])) {
-                perror("Error writing filename");
-                fclose(fil);
-                return EXIT_FAILURE;
-            }
-
-            if(fwrite(data, 1, size, fil) != size) {
-                perror("Error writing file data");
-                fclose(fil);
-                return EXIT_FAILURE;
-            }
+            add_file(fil, f, argv[2 + i], cd, i);
         }
 
         /* Write central directory */
@@ -149,6 +155,7 @@ int main(int argc, char* argv[]) {
             }
             cd_len += cd[i].name_len;
         }
+        free(cd);
     }
 
     /* Assemble and write EOCD */
