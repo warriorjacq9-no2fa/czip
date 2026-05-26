@@ -54,17 +54,47 @@ int add_file(FILE* archive, FILE* f, char* filename, zip_cdr_t* cd, size_t cd_id
     }
     fclose(f);
 
+    void* out = malloc(compressBound(size));
+
+    z_stream strm = {0};
+
+    strm.next_in = (Bytef *)data;
+    strm.avail_in = size;
+
+    strm.next_out = out;
+    strm.avail_out = compressBound(size);
+
+    // Negative windowBits => raw DEFLATE
+    if (deflateInit2(&strm,
+                     Z_DEFAULT_COMPRESSION,
+                     Z_DEFLATED,
+                     -MAX_WBITS,
+                     8,
+                     Z_DEFAULT_STRATEGY) != Z_OK) {
+        return EXIT_FAILURE;
+    }
+
+    int ret = deflate(&strm, Z_FINISH);
+
+    if (ret != Z_STREAM_END) {
+        deflateEnd(&strm);
+        return EXIT_FAILURE;
+    }
+
+    size_t compressed_size = strm.total_out;
+    deflateEnd(&strm);
+
     uint32_t crc32 = do_crc32(data, size);
 
     zip_lfh_t lfh = {
         .signature = LFH_SIG,
         .min_version = 20,
         .flags = 0,
-        .compression = 0,
+        .compression = 8,
         .mtime = time,
         .mdate = date,
         .crc32 = crc32,
-        .size_comp = size,
+        .size_comp = compressed_size,
         .size = size,
         .name_len = strlen(filename),
         .extra_len = 0
@@ -78,7 +108,7 @@ int add_file(FILE* archive, FILE* f, char* filename, zip_cdr_t* cd, size_t cd_id
         .mtime = time,
         .mdate = date,
         .crc32 = crc32,
-        .size_comp = size,
+        .size_comp = compressed_size,
         .size = size,
         .name_len = strlen(filename),
         .extra_len = 0,
@@ -103,7 +133,7 @@ int add_file(FILE* archive, FILE* f, char* filename, zip_cdr_t* cd, size_t cd_id
         return EXIT_FAILURE;
     }
 
-    if(fwrite(data, 1, size, archive) != size) {
+    if(fwrite(out, 1, size, archive) != size) {
         perror("Error writing file data");
         fclose(archive);
         return EXIT_FAILURE;
