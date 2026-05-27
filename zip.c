@@ -46,7 +46,15 @@ void quit(int code) {
     exit(code);
 }
 
-void add_file(FILE* f, char* filename, size_t cd_idx) {
+void add_file(char* filename, size_t cd_idx) {
+    FILE* f = fopen(filename, "rb");
+    if(f == NULL) {
+        char msg[64];
+        snprintf(msg, 64, "Failed to open file %s", filename);
+        perror(msg);
+        return;
+    }
+
     uint16_t time = dos_time();
     uint16_t date = dos_date();
 
@@ -174,6 +182,8 @@ void archive_write(char** filenames) {
         .comment_len = 0
     };
 
+    if(fseek(archive, -sizeof(zip_eocd_t), SEEK_END))
+
     if(fwrite(&eocd, 1, sizeof(zip_eocd_t), archive) != sizeof(zip_eocd_t)) {
         perror("Error writing EOCD");
         quit(EXIT_FAILURE);
@@ -196,16 +206,8 @@ int main(int argc, char* argv[]) {
     cd = malloc(cd_len);
 
     if(files > 0) {
-        /* Prepare headers */
         for(size_t i = 0; i < files; i++) {
-            FILE* f = fopen(argv[2 + i], "rb");
-            if(f == NULL) {
-                char msg[64];
-                snprintf(msg, 64, "Failed to open file %s", argv[2 + i]);
-                perror(msg);
-                continue;
-            }
-            add_file(f, argv[2 + i], i);
+            add_file(argv[2 + i], i);
         }
     }
 
