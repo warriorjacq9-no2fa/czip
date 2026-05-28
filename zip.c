@@ -3,10 +3,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include <zlib.h>
 
 static zip_cdr_t* cd;
 static size_t cd_len;
+static size_t cd_offset;
+static bool eocd_written = false;
+
 static FILE* archive;
 static size_t files;
 
@@ -154,9 +158,21 @@ void add_file(char* filename, size_t cd_idx) {
     }
 }
 
-void archive_write(char** filenames) {
-    /* Write central directory */
+void cd_write(char** filenames) {
+    if(fseek(archive, 
+        -(cd_len + (eocd_written ? sizeof(zip_eocd_t) : 0)), 
+        SEEK_END) < 0) {
+        perror("Error seeking");
+        quit(EXIT_FAILURE);
+    }
 
+    if((cd_offset = ftell(archive)) < 0) {
+        perror("ftell error");
+        quit(EXIT_FAILURE);
+    }
+
+    /* Write central directory */
+    cd_len = files * sizeof(zip_cdr_t);
     for(int i = 0; i < files; i++) {
         if(fwrite(&cd[i], 1, sizeof(zip_cdr_t), archive) != sizeof(zip_cdr_t)) {
             perror("Error writing central directory");
@@ -178,11 +194,9 @@ void archive_write(char** filenames) {
         .cd_len_ldisk = files,
         .cd_len = files,
         .cd_size = cd_len,
-        .cd_offset = ftell(archive) - cd_len,
+        .cd_offset = cd_offset,
         .comment_len = 0
     };
-
-    if(fseek(archive, -sizeof(zip_eocd_t), SEEK_END))
 
     if(fwrite(&eocd, 1, sizeof(zip_eocd_t), archive) != sizeof(zip_eocd_t)) {
         perror("Error writing EOCD");
@@ -202,8 +216,7 @@ int main(int argc, char* argv[]) {
     }
 
     files = argc - 2;
-    cd_len = files * sizeof(zip_cdr_t);
-    cd = malloc(cd_len);
+    cd = malloc(files * (sizeof(zip_cdr_t) + 256));
 
     if(files > 0) {
         for(size_t i = 0; i < files; i++) {
@@ -211,7 +224,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    archive_write(&argv[2]);
+    cd_write(&argv[2]);
 
     quit(EXIT_SUCCESS);
 }
