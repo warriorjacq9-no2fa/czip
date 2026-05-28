@@ -9,7 +9,6 @@
 static zip_cdr_t* cd;
 static size_t cd_len;
 static size_t cd_offset;
-static bool eocd_written = false;
 
 static FILE* archive;
 static size_t files;
@@ -50,6 +49,62 @@ void quit(int code) {
     exit(code);
 }
 
+void cd_update() {
+    cd_len = files * sizeof(zip_cdr_t);
+    for(int i = 0; i < files; i++) {
+        cd_len += cd[i].name_len;
+    }
+}
+
+void insert_before_file(size_t file_idx, void* data, size_t len) {
+    size_t insert_pos = cd[file_idx].lfh_off;
+    size_t tail_len = cd_offset - insert_pos;
+
+    void* tail = malloc(tail_len);
+    if(!tail) quit(EXIT_FAILURE);
+
+    fseek(archive, insert_pos, SEEK_SET);
+    fread(tail, 1, tail_len, archive);
+
+    fseek(archive, insert_pos, SEEK_SET);
+    fwrite(data, 1, len, archive);
+    fwrite(tail, 1, tail_len, archive);
+    free(tail);
+
+    cd_offset += len;
+
+    /* Fix up LFH offsets for every file that moved */
+    for(size_t i = 0; i < files; i++) {
+        if(cd[i].lfh_off >= insert_pos)
+            cd[i].lfh_off += len;
+    }
+}
+
+void cd_add(char* filename, size_t lfh_off, size_t size_comp, size_t size, size_t cd_idx, uint32_t crc32) {
+    uint16_t time = dos_time();
+    uint16_t date = dos_date();
+
+    cd[cd_idx] = (zip_cdr_t){
+        .signature = CDR_SIG,
+        .version = 20,
+        .min_version = 20,
+        .flags = 0,
+        .compression = 8,
+        .mtime = time,
+        .mdate = date,
+        .crc32 = crc32,
+        .size_comp = size_comp,
+        .size = size,
+        .name_len = strlen(filename),
+        .extra_len = 0,
+        .comment_len = 0,
+        .disk_start = 0,
+        .attrs_internal = 0,
+        .attrs = 0,
+        .lfh_off = lfh_off
+    };
+}
+
 void add_file(char* filename, size_t cd_idx) {
     FILE* f = fopen(filename, "rb");
     if(f == NULL) {
@@ -57,6 +112,10 @@ void add_file(char* filename, size_t cd_idx) {
         snprintf(msg, 64, "Failed to open file %s", filename);
         perror(msg);
         return;
+    }
+    if(fseek(archive, cd_offset, SEEK_SET) < 0) {
+        perror("Error seeking");
+        quit(EXIT_FAILURE);
     }
 
     uint16_t time = dos_time();
@@ -121,24 +180,7 @@ void add_file(char* filename, size_t cd_idx) {
         .extra_len = 0
     };
 
-    cd[cd_idx] = (zip_cdr_t){
-        .signature = CDR_SIG,
-        .version = 20,
-        .min_version = 20,
-        .flags = 0,
-        .mtime = time,
-        .mdate = date,
-        .crc32 = crc32,
-        .size_comp = compressed_size,
-        .size = size,
-        .name_len = strlen(filename),
-        .extra_len = 0,
-        .comment_len = 0,
-        .disk_start = 0,
-        .attrs_internal = 0,
-        .attrs = 0,
-        .lfh_off = ftell(archive)
-    };
+    cd_add(filename, ftell(archive), compressed_size, size, cd_idx, crc32);
 
     /* Write LFH and data */
 
@@ -152,27 +194,26 @@ void add_file(char* filename, size_t cd_idx) {
         quit(EXIT_FAILURE);
     }
 
-    if(fwrite(out, 1, size, archive) != size) {
+    if(fwrite(out, 1, compressed_size, archive) != compressed_size) {
         perror("Error writing file data");
         quit(EXIT_FAILURE);
     }
+
+    size_t file_end = ftell(archive);
+    if(file_end < 0) {
+        perror("ftell error");
+        quit(EXIT_FAILURE);
+    }
+    cd_offset = ftell(archive);
 }
 
 void cd_write(char** filenames) {
-    if(fseek(archive, 
-        -(cd_len + (eocd_written ? sizeof(zip_eocd_t) : 0)), 
-        SEEK_END) < 0) {
+    if(fseek(archive, cd_offset, SEEK_SET) < 0) {
         perror("Error seeking");
         quit(EXIT_FAILURE);
     }
 
-    if((cd_offset = ftell(archive)) < 0) {
-        perror("ftell error");
-        quit(EXIT_FAILURE);
-    }
-
     /* Write central directory */
-    cd_len = files * sizeof(zip_cdr_t);
     for(int i = 0; i < files; i++) {
         if(fwrite(&cd[i], 1, sizeof(zip_cdr_t), archive) != sizeof(zip_cdr_t)) {
             perror("Error writing central directory");
@@ -182,8 +223,9 @@ void cd_write(char** filenames) {
             perror("Error writing filename");
             quit(EXIT_FAILURE);
         }
-        cd_len += cd[i].name_len;
     }
+
+    cd_update();
 
     /* Assemble and write EOCD */
 
@@ -202,6 +244,9 @@ void cd_write(char** filenames) {
         perror("Error writing EOCD");
         quit(EXIT_FAILURE);
     }
+
+    fflush(archive);
+    ftruncate(fileno(archive), ftell(archive));
 }
 
 int main(int argc, char* argv[]) {
@@ -222,9 +267,11 @@ int main(int argc, char* argv[]) {
         for(size_t i = 0; i < argc - 2; i++) {
             files++;
             add_file(argv[2 + i], i);
+            cd_write(&argv[2]);
         }
     }
 
+    insert_before_file(0, "Hello polyglot!", 16);
     cd_write(&argv[2]);
 
     quit(EXIT_SUCCESS);
