@@ -215,11 +215,12 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    files = argc - 2;
-    cd = malloc(files * (sizeof(zip_cdr_t) + 256));
+    files = 0;
+    cd = malloc((argc - 2) * (sizeof(zip_cdr_t) + 256));
 
-    if(files > 0) {
-        for(size_t i = 0; i < files; i++) {
+    if(argc > 2) {
+        for(size_t i = 0; i < argc - 2; i++) {
+            files++;
             add_file(argv[2 + i], i);
         }
     }
