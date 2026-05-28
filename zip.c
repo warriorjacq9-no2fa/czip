@@ -105,7 +105,7 @@ void cd_add(char* filename, size_t lfh_off, size_t size_comp, size_t size, size_
     };
 }
 
-void add_file(char* filename, size_t cd_idx) {
+void add_file(char* filename, size_t cd_idx, size_t shadows) {
     FILE* f = fopen(filename, "rb");
     if(f == NULL) {
         char msg[64];
@@ -165,6 +165,52 @@ void add_file(char* filename, size_t cd_idx) {
     deflateEnd(&strm);
 
     uint32_t crc32 = do_crc32(data, size);
+
+    size_t shadow_size = sizeof(zip_lfh_t) + strlen(filename);
+
+    for(size_t i = shadows; i > 0; i--) {
+        char fn[64];
+        snprintf(fn, 64, "%s%llu", filename, i);
+        printf("Adding shadow %llu\n", i);
+        fflush(stdout);
+        zip_lfh_t lfh = {
+            .signature = LFH_SIG,
+            .min_version = 20,
+            .flags = 0,
+            .compression = 8,
+            .mtime = time,
+            .mdate = date,
+            .crc32 = crc32,
+            .size_comp = compressed_size,
+            .size = size,
+            .name_len = strlen(fn),
+            .extra_len = shadow_size * i + 4
+        };
+
+        cd_add(fn, ftell(archive), compressed_size, size, cd_idx, crc32);
+
+        /* Write LFH and data */
+
+        uint16_t extra_hdr[] = {
+            0xFFFF,
+            shadow_size * i
+        };
+
+        if(fwrite(&lfh, 1, sizeof(zip_lfh_t), archive) != sizeof(zip_lfh_t)) {
+            perror("Error writing LFH");
+            quit(EXIT_FAILURE);
+        }
+
+        if(fwrite(fn, 1, strlen(fn), archive) != strlen(fn)) {
+            perror("Error writing filename");
+            quit(EXIT_FAILURE);
+        }
+
+        if(fwrite(extra_hdr, 1, 4, archive) != 4) {
+            perror("Error writing file data");
+            quit(EXIT_FAILURE);
+        }
+    }
 
     zip_lfh_t lfh = {
         .signature = LFH_SIG,
@@ -266,12 +312,12 @@ int main(int argc, char* argv[]) {
     if(argc > 2) {
         for(size_t i = 0; i < argc - 2; i++) {
             files++;
-            add_file(argv[2 + i], i);
+            add_file(argv[2 + i], i, 0);
             cd_write(&argv[2]);
         }
     }
+    add_file(argv[2], argc - 2, 5);
 
-    insert_before_file(0, "Hello polyglot!", 16);
     cd_write(&argv[2]);
 
     quit(EXIT_SUCCESS);
