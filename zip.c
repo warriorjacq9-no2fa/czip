@@ -6,13 +6,15 @@
 #include <stdbool.h>
 #include <zlib.h>
 
+static const size_t OUTPUT_BUFFER_SIZE = 4194304;
+
 static zip_cdr_t* cd;
 static size_t cd_len;
 static size_t cd_offset;
 
 static FILE* archive;
 static size_t files;
-static char** filenames;
+static const char** filenames;
 
 uint16_t dos_time() {
     time_t now = time(NULL);
@@ -47,6 +49,7 @@ uint32_t do_crc32(const void *buf, size_t len) {
 void quit(int code) {
     if(cd) free(cd);
     if(archive) fclose(archive);
+    if(filenames) free(filenames);
     exit(code);
 }
 
@@ -81,7 +84,7 @@ void insert_before_file(size_t file_idx, void* data, size_t len) {
     }
 }
 
-void cd_add(char* filename, size_t lfh_off, size_t size_comp, size_t size, size_t cd_idx, uint32_t crc32) {
+void cd_add(const char* filename, size_t lfh_off, size_t size_comp, size_t size, size_t cd_idx, uint32_t crc32) {
     uint16_t time = dos_time();
     uint16_t date = dos_date();
 
@@ -110,7 +113,7 @@ void cd_add(char* filename, size_t lfh_off, size_t size_comp, size_t size, size_
     };
 }
 
-void add_file(char* filename, size_t cd_idx, size_t shadows) {
+void add_file(const char* filename, size_t cd_idx, size_t shadows) {
     FILE* f = fopen(filename, "rb");
     if(f == NULL) {
         char msg[64];
@@ -140,31 +143,49 @@ void add_file(char* filename, size_t cd_idx, size_t shadows) {
     fclose(f);
 
     void* out = malloc(compressBound(size));
+    void* out_buf = out;
+
+    void* buf = malloc(OUTPUT_BUFFER_SIZE);
 
     z_stream strm = {0};
 
     strm.next_in = (Bytef *)data;
     strm.avail_in = size;
 
-    strm.next_out = out;
-    strm.avail_out = compressBound(size);
+    strm.next_out = buf;
+    strm.avail_out = OUTPUT_BUFFER_SIZE;
+
+    int ret;
 
     // Negative windowBits => raw DEFLATE
-    if (deflateInit2(&strm,
+    if ((ret = deflateInit2(&strm,
                      Z_DEFAULT_COMPRESSION,
                      Z_DEFLATED,
                      -MAX_WBITS,
                      8,
-                     Z_DEFAULT_STRATEGY) != Z_OK) {
+                     Z_DEFAULT_STRATEGY)) != Z_OK) {
+        fprintf(stderr, "Failed to init DEFLATE: %d\n", ret);
         quit(EXIT_FAILURE);
     }
 
-    int ret = deflate(&strm, Z_FINISH);
+    do {
+        // 1. Provide a fresh output buffer or reset pointers
+        strm.next_out = buf;
+        strm.avail_out = OUTPUT_BUFFER_SIZE;
+
+        // 2. Continue deflating with Z_FINISH
+        ret = deflate(&strm, Z_FINISH);
+        
+        // 3. Process the compressed data generated in this pass
+        size_t write_bytes = OUTPUT_BUFFER_SIZE - strm.avail_out;
+        memcpy(out_buf, buf, write_bytes);
+        out_buf = ((uint8_t*)out_buf + write_bytes);
+    } while (ret == Z_OK); // Loop as long as it returns 0 (Z_OK)
 
     if (ret != Z_STREAM_END) {
-        deflateEnd(&strm);
-        quit(EXIT_FAILURE);
-    }
+        // Handle error (e.g., Z_BUF_ERROR, Z_STREAM_ERROR)
+}
+
 
     size_t compressed_size = strm.total_out;
     deflateEnd(&strm);
