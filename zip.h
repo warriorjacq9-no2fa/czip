@@ -54,4 +54,27 @@ typedef struct end_central_directory_record {
     uint16_t    comment_len;
 } __attribute__((packed)) zip_eocd_t;
 
+#define EOCD64_SIG  0x06064b50
+#define EOCDL64_SIG 0x07064b50
+
+typedef struct end_central_directory_record_64 {
+    uint32_t    signature;
+    uint64_t    size;
+    uint16_t    version;
+    uint16_t    min_version;
+    uint32_t    disk_num;
+    uint32_t    cd_disk_num;
+    uint64_t    cd_len_ldisk;
+    uint64_t    cd_len;
+    uint64_t    cd_size;
+    uint64_t    cd_offset;
+} __attribute__((packed)) zip_eocd64_t;
+
+typedef struct end_central_directory_locator_64 {
+    uint32_t    signature;
+    uint32_t    eocd_disk_num;
+    uint64_t    eocd_offset;
+    uint32_t    num_disks;
+} __attribute__((packed)) zip_eocdl64_t;
+
 #endif

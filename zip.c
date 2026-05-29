@@ -314,16 +314,59 @@ void cd_write() {
 
     /* Assemble and write EOCD */
 
-    zip_eocd_t eocd = {
-        .signature = EOCD_SIG,
-        .disk_num = 0,
-        .cd_disk_num = 0,
-        .cd_len_ldisk = files,
-        .cd_len = files,
-        .cd_size = cd_len,
-        .cd_offset = cd_offset,
-        .comment_len = 0
-    };
+    zip_eocd_t eocd;
+
+    if(files > 65535) {
+        zip_eocd64_t eocd64 = {
+            .signature = EOCD64_SIG,
+            .size = sizeof(zip_eocd64_t) - 12,
+            .version = 45,
+            .min_version = 45,
+            .disk_num = 0,
+            .cd_disk_num = 0,
+            .cd_len_ldisk = files,
+            .cd_len = files,
+            .cd_size = cd_len,
+            .cd_offset = cd_offset
+        };
+        zip_eocdl64_t eocdl64 = {
+            .signature = EOCDL64_SIG,
+            .eocd_disk_num = 0,
+            .eocd_offset = ftell(archive),
+            .num_disks = 1
+        };
+
+        if(fwrite(&eocd64, 1, sizeof(zip_eocd64_t), archive) != sizeof(zip_eocd64_t)) {
+            perror("Error writing EOCD64");
+            quit(EXIT_FAILURE);
+        }
+        if(fwrite(&eocdl64, 1, sizeof(zip_eocdl64_t), archive) != sizeof(zip_eocdl64_t)) {
+            perror("Error writing EOCDL64");
+            quit(EXIT_FAILURE);
+        }
+
+        eocd = (zip_eocd_t){
+            .signature = EOCD_SIG,
+            .disk_num = 0xFFFF,
+            .cd_disk_num = 0xFFFF,
+            .cd_len_ldisk = 0xFFFF,
+            .cd_len = 0xFFFF,
+            .cd_size = 0xFFFFFFFF,
+            .cd_offset = 0xFFFFFFFF,
+            .comment_len = 0
+        };
+    } else {
+        eocd = (zip_eocd_t){
+            .signature = EOCD_SIG,
+            .disk_num = 0,
+            .cd_disk_num = 0,
+            .cd_len_ldisk = files,
+            .cd_len = files,
+            .cd_size = cd_len,
+            .cd_offset = cd_offset,
+            .comment_len = 0
+        };
+    }
 
     if(fwrite(&eocd, 1, sizeof(zip_eocd_t), archive) != sizeof(zip_eocd_t)) {
         perror("Error writing EOCD");
