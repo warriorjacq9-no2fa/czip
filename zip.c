@@ -62,8 +62,6 @@ void cd_add(const char* filename, size_t lfh_off, size_t size_comp, size_t size,
 
     filenames[cd_idx] = filename;
 
-    printf("Added file %s at %lu\n", filenames[cd_idx], cd_idx);
-
     cd[cd_idx] = (zip_cdr_t){
         .signature = CDR_SIG,
         .version = 20,
@@ -206,6 +204,8 @@ void add_file(const char* filename, size_t cd_idx, size_t shadows) {
     uint16_t time = dos_time();
     uint16_t date = dos_date();
 
+    printf("Adding duplicates...\n");
+    fflush(stdout);
     for(size_t i = shadows; i > 0; i--) {
         char *fn = malloc(64);
         snprintf(fn, 64, "%s%lu", filename, i);
