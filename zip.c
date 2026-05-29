@@ -176,7 +176,6 @@ void add_file(char* filename, size_t cd_idx, size_t shadows) {
     for(size_t i = shadows; i > 0; i--) {
         char fn[64];
         snprintf(fn, 64, "%s%lu", filename, i);
-        printf("Adding shadow %lu\n", i);
         fflush(stdout);
         zip_lfh_t lfh = {
             .signature = LFH_SIG,
@@ -276,6 +275,7 @@ void cd_write() {
             perror("Error writing filename");
             quit(EXIT_FAILURE);
         }
+        printf("Wrote CD entry %s (%d)\n", filenames[i], i);
     }
 
     cd_update();
@@ -306,8 +306,8 @@ void cd_write() {
 }
 
 int main(int argc, char* argv[]) {
-    if(argc < 2) {
-        fprintf(stderr, "Usage: %s <outfile> [files]\n", argv[0]);
+    if(argc != 4) {
+        fprintf(stderr, "Usage: %s <outfile> <file> <overlaps>\n", argv[0]);
         return EXIT_FAILURE;
     }
     archive = fopen(argv[1], "wb+");
@@ -316,20 +316,15 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
+    size_t overlaps = strtoul(argv[3], NULL, 10);
+
     filenames = malloc(128 * sizeof(char*));
     memset(filenames, 0, 128 * sizeof(char*));
 
-    files = 0;
-    cd = malloc((argc - 2) * (sizeof(zip_cdr_t) + 256));
+    files = 1;
+    cd = malloc(128 * (sizeof(zip_cdr_t) + 256));
 
-    if(argc > 2) {
-        for(size_t i = 0; i < argc - 2; i++) {
-            files++;
-            add_file(argv[2 + i], i, 0);
-            cd_write(&argv[2]);
-        }
-    }
-
+    add_file(argv[2], 0, overlaps);
     cd_write();
 
     quit(EXIT_SUCCESS);
