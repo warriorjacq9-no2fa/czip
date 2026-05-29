@@ -12,6 +12,7 @@ static size_t cd_offset;
 
 static FILE* archive;
 static size_t files;
+static char** filenames;
 
 uint16_t dos_time() {
     time_t now = time(NULL);
@@ -83,6 +84,10 @@ void insert_before_file(size_t file_idx, void* data, size_t len) {
 void cd_add(char* filename, size_t lfh_off, size_t size_comp, size_t size, size_t cd_idx, uint32_t crc32) {
     uint16_t time = dos_time();
     uint16_t date = dos_date();
+
+    filenames[cd_idx] = filename;
+
+    printf("Added file %s at %lu\n", filenames[cd_idx], cd_idx);
 
     cd[cd_idx] = (zip_cdr_t){
         .signature = CDR_SIG,
@@ -170,8 +175,8 @@ void add_file(char* filename, size_t cd_idx, size_t shadows) {
 
     for(size_t i = shadows; i > 0; i--) {
         char fn[64];
-        snprintf(fn, 64, "%s%llu", filename, i);
-        printf("Adding shadow %llu\n", i);
+        snprintf(fn, 64, "%s%lu", filename, i);
+        printf("Adding shadow %lu\n", i);
         fflush(stdout);
         zip_lfh_t lfh = {
             .signature = LFH_SIG,
@@ -187,7 +192,7 @@ void add_file(char* filename, size_t cd_idx, size_t shadows) {
             .extra_len = shadow_size * i + 4
         };
 
-        cd_add(fn, ftell(archive), compressed_size, size, cd_idx, crc32);
+        cd_add(fn, ftell(archive), compressed_size, size, cd_idx + i, crc32);
 
         /* Write LFH and data */
 
@@ -210,6 +215,8 @@ void add_file(char* filename, size_t cd_idx, size_t shadows) {
             perror("Error writing file data");
             quit(EXIT_FAILURE);
         }
+
+        files++;
     }
 
     zip_lfh_t lfh = {
@@ -253,7 +260,7 @@ void add_file(char* filename, size_t cd_idx, size_t shadows) {
     cd_offset = ftell(archive);
 }
 
-void cd_write(char** filenames) {
+void cd_write() {
     if(fseek(archive, cd_offset, SEEK_SET) < 0) {
         perror("Error seeking");
         quit(EXIT_FAILURE);
@@ -292,7 +299,10 @@ void cd_write(char** filenames) {
     }
 
     fflush(archive);
-    ftruncate(fileno(archive), ftell(archive));
+    if(ftruncate(fileno(archive), ftell(archive)) < 0) {
+        perror("Error truncating");
+        quit(EXIT_FAILURE);
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -306,6 +316,9 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
+    filenames = malloc(128 * sizeof(char*));
+    memset(filenames, 0, 128 * sizeof(char*));
+
     files = 0;
     cd = malloc((argc - 2) * (sizeof(zip_cdr_t) + 256));
 
@@ -316,9 +329,8 @@ int main(int argc, char* argv[]) {
             cd_write(&argv[2]);
         }
     }
-    add_file(argv[2], argc - 2, 5);
 
-    cd_write(&argv[2]);
+    cd_write();
 
     quit(EXIT_SUCCESS);
 }
