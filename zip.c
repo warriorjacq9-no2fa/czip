@@ -308,7 +308,6 @@ void cd_write() {
             perror("Error writing filename");
             quit(EXIT_FAILURE);
         }
-        printf("Wrote CD entry %s (%d)\n", filenames[i], i);
     }
 
     cd_update();
