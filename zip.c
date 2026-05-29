@@ -6,8 +6,6 @@
 #include <stdbool.h>
 #include <zlib.h>
 
-static const size_t OUTPUT_BUFFER_SIZE = 4194304;
-
 static zip_cdr_t* cd;
 static size_t cd_len;
 static size_t cd_offset;
@@ -42,14 +40,12 @@ uint16_t dos_date() {
     return dos_date;
 }
 
-uint32_t do_crc32(const void *buf, size_t len) {
-    return crc32(0L, (const Bytef*)buf, len);
-}
-
 void quit(int code) {
     if(cd) free(cd);
     if(archive) fclose(archive);
-    if(filenames) free(filenames);
+    if(filenames) {
+        free(filenames);
+    }
     exit(code);
 }
 
@@ -57,30 +53,6 @@ void cd_update() {
     cd_len = files * sizeof(zip_cdr_t);
     for(int i = 0; i < files; i++) {
         cd_len += cd[i].name_len;
-    }
-}
-
-void insert_before_file(size_t file_idx, void* data, size_t len) {
-    size_t insert_pos = cd[file_idx].lfh_off;
-    size_t tail_len = cd_offset - insert_pos;
-
-    void* tail = malloc(tail_len);
-    if(!tail) quit(EXIT_FAILURE);
-
-    fseek(archive, insert_pos, SEEK_SET);
-    fread(tail, 1, tail_len, archive);
-
-    fseek(archive, insert_pos, SEEK_SET);
-    fwrite(data, 1, len, archive);
-    fwrite(tail, 1, tail_len, archive);
-    free(tail);
-
-    cd_offset += len;
-
-    /* Fix up LFH offsets for every file that moved */
-    for(size_t i = 0; i < files; i++) {
-        if(cd[i].lfh_off >= insert_pos)
-            cd[i].lfh_off += len;
     }
 }
 
@@ -113,6 +85,110 @@ void cd_add(const char* filename, size_t lfh_off, size_t size_comp, size_t size,
     };
 }
 
+#define CHUNK_SIZE 16384 // 16KB chunks for streaming
+
+void* compress_file(FILE* f, uint32_t* crc32_val, size_t* comp_size, size_t* size) {
+    printf("Compressing data...\n");
+    fflush(stdout);
+    // 1. Initialize sizes and CRC
+    *size = 0;
+    *comp_size = 0;
+    *crc32_val = crc32(0L, Z_NULL, 0);
+
+    // 2. Set up zlib stream
+    z_stream strm = {0};
+    int ret = deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
+    if (ret != Z_OK) {
+        fprintf(stderr, "Failed to init DEFLATE: %d\n", ret);
+        return NULL; 
+    }
+
+    // 3. Allocate static buffers
+    unsigned char* in_buf = malloc(CHUNK_SIZE);
+    unsigned char* out_buf = malloc(CHUNK_SIZE);
+    
+    // Allocate initial output container (grows dynamically)
+    size_t out_capacity = CHUNK_SIZE;
+    unsigned char* out_data = malloc(out_capacity);
+
+    if (!in_buf || !out_buf || !out_data) {
+        fprintf(stderr, "Memory allocation failed\n");
+        deflateEnd(&strm);
+        free(in_buf); free(out_buf); free(out_data);
+        return NULL;
+    }
+
+    int flush;
+    do {
+        // Read a chunk from the file
+        size_t read_bytes = fread(in_buf, 1, CHUNK_SIZE, f);
+        if (ferror(f)) {
+            perror("Error reading file");
+            deflateEnd(&strm);
+            free(in_buf); free(out_buf); free(out_data);
+            return NULL;
+        }
+
+        // Track stats
+        *size += read_bytes;
+        *crc32_val = crc32(*crc32_val, in_buf, (uInt)read_bytes);
+        
+        // Signal Z_FINISH only when reaching the end of the file
+        flush = feof(f) ? Z_FINISH : Z_NO_FLUSH;
+        strm.next_in = in_buf;
+        strm.avail_in = (uInt)read_bytes;
+
+        // Consume all input for this chunk
+        do {
+            strm.next_out = out_buf;
+            strm.avail_out = CHUNK_SIZE;
+
+            ret = deflate(&strm, flush);
+            if (ret == Z_STREAM_ERROR) {
+                fprintf(stderr, "Deflate stream error\n");
+                deflateEnd(&strm);
+                free(in_buf); free(out_buf); free(out_data);
+                return NULL;
+            }
+
+            size_t write_bytes = CHUNK_SIZE - strm.avail_out;
+            if (write_bytes > 0) {
+                // Dynamic reallocation to fit compressed output
+                if (*comp_size + write_bytes > out_capacity) {
+                    out_capacity *= 2;
+                    unsigned char* new_out = realloc(out_data, out_capacity);
+                    if (!new_out) {
+                        fprintf(stderr, "Out of memory during realloc\n");
+                        deflateEnd(&strm);
+                        free(in_buf); free(out_buf); free(out_data);
+                        return NULL;
+                    }
+                    out_data = new_out;
+                }
+                memcpy(out_data + *comp_size, out_buf, write_bytes);
+                *comp_size += write_bytes;
+            }
+        } while (strm.avail_out == 0); // Loop if output buffer filled up
+
+    } while (flush != Z_FINISH);
+
+    if (ret != Z_STREAM_END) {
+        fprintf(stderr, "Deflate did not end cleanly: %d\n", ret);
+        deflateEnd(&strm);
+        free(in_buf); free(out_buf); free(out_data);
+        return NULL;
+    }
+
+    // Clean up
+    deflateEnd(&strm);
+    free(in_buf);
+    free(out_buf);
+    fclose(f);
+
+    // Shrink memory down to actual compressed size
+    return realloc(out_data, *comp_size);
+}
+
 void add_file(const char* filename, size_t cd_idx, size_t shadows) {
     FILE* f = fopen(filename, "rb");
     if(f == NULL) {
@@ -121,81 +197,17 @@ void add_file(const char* filename, size_t cd_idx, size_t shadows) {
         perror(msg);
         return;
     }
-    if(fseek(archive, cd_offset, SEEK_SET) < 0) {
-        perror("Error seeking");
-        quit(EXIT_FAILURE);
-    }
-
+    size_t size, compressed_size;
+    uint32_t crc32;
+    void* out = compress_file(f, &crc32, &compressed_size, &size);
+    
+    size_t shadow_size = sizeof(zip_lfh_t) + strlen(filename);
+    
     uint16_t time = dos_time();
     uint16_t date = dos_date();
 
-    if(fseek(f, 0, SEEK_END) < 0) {
-        perror("Error seeking");
-        quit(EXIT_FAILURE);
-    }
-    size_t size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    void* data = malloc(size);
-    if(fread(data, 1, size, f) != size) {
-        perror("Error reading");
-        quit(EXIT_FAILURE);
-    }
-    fclose(f);
-
-    void* out = malloc(compressBound(size));
-    void* out_buf = out;
-
-    void* buf = malloc(OUTPUT_BUFFER_SIZE);
-
-    z_stream strm = {0};
-
-    strm.next_in = (Bytef *)data;
-    strm.avail_in = size;
-
-    strm.next_out = buf;
-    strm.avail_out = OUTPUT_BUFFER_SIZE;
-
-    int ret;
-
-    // Negative windowBits => raw DEFLATE
-    if ((ret = deflateInit2(&strm,
-                     Z_DEFAULT_COMPRESSION,
-                     Z_DEFLATED,
-                     -MAX_WBITS,
-                     8,
-                     Z_DEFAULT_STRATEGY)) != Z_OK) {
-        fprintf(stderr, "Failed to init DEFLATE: %d\n", ret);
-        quit(EXIT_FAILURE);
-    }
-
-    do {
-        // 1. Provide a fresh output buffer or reset pointers
-        strm.next_out = buf;
-        strm.avail_out = OUTPUT_BUFFER_SIZE;
-
-        // 2. Continue deflating with Z_FINISH
-        ret = deflate(&strm, Z_FINISH);
-        
-        // 3. Process the compressed data generated in this pass
-        size_t write_bytes = OUTPUT_BUFFER_SIZE - strm.avail_out;
-        memcpy(out_buf, buf, write_bytes);
-        out_buf = ((uint8_t*)out_buf + write_bytes);
-    } while (ret == Z_OK); // Loop as long as it returns 0 (Z_OK)
-
-    if (ret != Z_STREAM_END) {
-        // Handle error (e.g., Z_BUF_ERROR, Z_STREAM_ERROR)
-}
-
-
-    size_t compressed_size = strm.total_out;
-    deflateEnd(&strm);
-
-    uint32_t crc32 = do_crc32(data, size);
-
-    size_t shadow_size = sizeof(zip_lfh_t) + strlen(filename);
-
     for(size_t i = shadows; i > 0; i--) {
-        char fn[64];
+        char *fn = malloc(64);
         snprintf(fn, 64, "%s%lu", filename, i);
         fflush(stdout);
         zip_lfh_t lfh = {
@@ -339,11 +351,10 @@ int main(int argc, char* argv[]) {
 
     size_t overlaps = strtoul(argv[3], NULL, 10);
 
-    filenames = malloc(128 * sizeof(char*));
-    memset(filenames, 0, 128 * sizeof(char*));
+    filenames = calloc((overlaps + 2), sizeof(char*));
 
     files = 1;
-    cd = malloc(128 * (sizeof(zip_cdr_t) + 256));
+    cd = calloc((overlaps + 2), sizeof(zip_cdr_t));
 
     add_file(argv[2], 0, overlaps);
     cd_write();
